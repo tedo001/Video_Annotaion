@@ -1,41 +1,199 @@
-"""Right-hand side panel showing box list + action buttons."""
+"""
+Right-hand panel with two tabs:
+  AUTO  — YOLO confidence slider, run buttons
+  MANUAL— class selector, box list, delete button
+"""
 import tkinter as tk
 from tkinter import ttk
 from typing import List, Callable, Dict
+
 from models.annotation_model import BoundingBox
 from utils.config import BG_PANEL, BG_DARK, ACCENT, TEXT_LIGHT
 
 
 class AnnotationPanel(tk.Frame):
-    """
-    Shows the list of BoundingBox objects for the current frame.
-    Provides YOLO, Save, and Clear buttons.
-    """
-
     def __init__(
         self,
         master,
-        on_yolo_click:     Callable,
-        on_yolo_all_click: Callable,
-        on_save_click:     Callable,
-        on_clear_click:    Callable,
+        on_yolo_click:       Callable,
+        on_yolo_all_click:   Callable,
+        on_save_click:       Callable,
+        on_clear_click:      Callable,
+        on_delete_box:       Callable = None,   # callable(box_index)
+        on_conf_change:      Callable = None,   # callable(float)
     ):
-        super().__init__(master, bg=BG_PANEL, width=260)
+        super().__init__(master, bg=BG_PANEL, width=280)
         self.pack_propagate(False)
-        self._on_yolo     = on_yolo_click
-        self._on_yolo_all = on_yolo_all_click
-        self._on_save     = on_save_click
-        self._on_clear    = on_clear_click
+
+        self._on_yolo       = on_yolo_click
+        self._on_yolo_all   = on_yolo_all_click
+        self._on_save       = on_save_click
+        self._on_clear      = on_clear_click
+        self._on_delete_box = on_delete_box
+        self._on_conf_change = on_conf_change
+
+        # Current class names from YOLO model
+        self._class_names: Dict[int, str] = {}
+
+        # Manual annotation state
+        self.selected_class_var = tk.StringVar(value="dog")
+        self.custom_class_var   = tk.StringVar(value="")
+
         self._build()
 
     # ── UI ────────────────────────────────────────────────────────────────────
     def _build(self):
+        # Header
         tk.Label(
-            self, text="ANNOTATIONS", bg=BG_PANEL, fg=ACCENT,
-            font=("Consolas", 11, "bold"),
-        ).pack(pady=(12, 4))
+            self, text="ANNOTATION PANEL",
+            bg=BG_PANEL, fg=ACCENT,
+            font=("Consolas", 10, "bold"),
+        ).pack(pady=(10, 4))
 
-        # box list
+        ttk.Separator(self, orient=tk.HORIZONTAL).pack(fill=tk.X, padx=8)
+
+        # Notebook tabs
+        style = ttk.Style()
+        style.theme_use("default")
+        style.configure(
+            "Dark.TNotebook",
+            background=BG_PANEL, borderwidth=0,
+        )
+        style.configure(
+            "Dark.TNotebook.Tab",
+            background=BG_DARK, foreground=TEXT_LIGHT,
+            font=("Consolas", 9, "bold"),
+            padding=[10, 4],
+        )
+        style.map(
+            "Dark.TNotebook.Tab",
+            background=[("selected", ACCENT)],
+            foreground=[("selected", "white")],
+        )
+
+        nb = ttk.Notebook(self, style="Dark.TNotebook")
+        nb.pack(fill=tk.BOTH, expand=True, padx=6, pady=6)
+
+        auto_tab   = tk.Frame(nb, bg=BG_PANEL)
+        manual_tab = tk.Frame(nb, bg=BG_PANEL)
+
+        nb.add(auto_tab,   text="⚡ Auto (YOLO)")
+        nb.add(manual_tab, text="✏ Manual")
+
+        self._build_auto_tab(auto_tab)
+        self._build_manual_tab(manual_tab)
+
+        # ── shared box list ───────────────────────────────────────────────────
+        self._build_box_list()
+
+        # ── bottom buttons ────────────────────────────────────────────────────
+        self._build_bottom_buttons()
+
+    def _build_auto_tab(self, parent):
+        tk.Label(
+            parent, text="Confidence Threshold",
+            bg=BG_PANEL, fg=TEXT_LIGHT, font=("Consolas", 9),
+        ).pack(pady=(10, 2), padx=10, anchor=tk.W)
+
+        conf_row = tk.Frame(parent, bg=BG_PANEL)
+        conf_row.pack(fill=tk.X, padx=10)
+
+        self.conf_var = tk.DoubleVar(value=0.45)
+        self.conf_label = tk.Label(
+            conf_row, text="0.45",
+            bg=BG_PANEL, fg=ACCENT, font=("Consolas", 10, "bold"), width=5,
+        )
+        self.conf_label.pack(side=tk.RIGHT)
+
+        conf_slider = tk.Scale(
+            conf_row, from_=0.1, to=0.95, resolution=0.05,
+            orient=tk.HORIZONTAL, variable=self.conf_var,
+            command=self._on_conf_slider,
+            bg=BG_PANEL, fg=TEXT_LIGHT, troughcolor=BG_DARK,
+            highlightthickness=0, sliderrelief=tk.FLAT, showvalue=False,
+        )
+        conf_slider.pack(fill=tk.X, side=tk.LEFT, expand=True)
+
+        # Filter classes
+        tk.Label(
+            parent, text="Filter Classes (comma-sep, blank=all)",
+            bg=BG_PANEL, fg=TEXT_LIGHT, font=("Consolas", 8),
+        ).pack(pady=(8, 2), padx=10, anchor=tk.W)
+
+        self.filter_var = tk.StringVar(value="")
+        tk.Entry(
+            parent, textvariable=self.filter_var,
+            bg=BG_DARK, fg=TEXT_LIGHT, insertbackground=TEXT_LIGHT,
+            relief=tk.FLAT, font=("Consolas", 9),
+        ).pack(fill=tk.X, padx=10, ipady=4)
+
+        # Run buttons
+        tk.Button(
+            parent, text="⚡  YOLO This Frame",
+            command=self._on_yolo,
+            bg=ACCENT, fg="white", relief=tk.FLAT,
+            padx=8, pady=6, font=("Consolas", 9, "bold"), cursor="hand2",
+        ).pack(fill=tk.X, padx=10, pady=(12, 3))
+
+        tk.Button(
+            parent, text="🔁  YOLO All Frames",
+            command=self._on_yolo_all,
+            bg="#5a4fbf", fg="white", relief=tk.FLAT,
+            padx=8, pady=6, font=("Consolas", 9, "bold"), cursor="hand2",
+        ).pack(fill=tk.X, padx=10, pady=3)
+
+    def _build_manual_tab(self, parent):
+        tk.Label(
+            parent, text="Select Class for New Box",
+            bg=BG_PANEL, fg=TEXT_LIGHT, font=("Consolas", 9),
+        ).pack(pady=(10, 2), padx=10, anchor=tk.W)
+
+        # Combobox (populated when YOLO loads)
+        self.class_combo = ttk.Combobox(
+            parent, textvariable=self.selected_class_var,
+            font=("Consolas", 9), state="readonly",
+        )
+        self.class_combo.pack(fill=tk.X, padx=10, ipady=3)
+
+        # Custom class override
+        tk.Label(
+            parent, text="  ─── or type custom class ───",
+            bg=BG_PANEL, fg="#888899", font=("Consolas", 8),
+        ).pack(pady=(6, 2))
+
+        custom_row = tk.Frame(parent, bg=BG_PANEL)
+        custom_row.pack(fill=tk.X, padx=10)
+
+        tk.Entry(
+            custom_row, textvariable=self.custom_class_var,
+            bg=BG_DARK, fg=TEXT_LIGHT, insertbackground=TEXT_LIGHT,
+            relief=tk.FLAT, font=("Consolas", 9),
+        ).pack(fill=tk.X, ipady=4)
+
+        tk.Label(
+            parent,
+            text=(
+                "\n  HOW TO ANNOTATE:\n"
+                "  1. Click '✏ Draw Box' above\n"
+                "  2. Click & drag on the video\n"
+                "  3. Box is added automatically\n"
+                "  4. Navigate frames & repeat\n"
+                "  5. Save when done"
+            ),
+            bg=BG_PANEL, fg="#8888aa",
+            font=("Consolas", 8), justify=tk.LEFT,
+        ).pack(pady=(10, 0), anchor=tk.W)
+
+    def _build_box_list(self):
+        separator_frame = tk.Frame(self, bg=BG_PANEL)
+        separator_frame.pack(fill=tk.X, padx=8, pady=(4, 0))
+        ttk.Separator(separator_frame, orient=tk.HORIZONTAL).pack(fill=tk.X)
+
+        tk.Label(
+            self, text="DETECTED BOXES",
+            bg=BG_PANEL, fg=TEXT_LIGHT, font=("Consolas", 8, "bold"),
+        ).pack(pady=(4, 2))
+
         list_frame = tk.Frame(self, bg=BG_PANEL)
         list_frame.pack(fill=tk.BOTH, expand=True, padx=8)
 
@@ -44,41 +202,90 @@ class AnnotationPanel(tk.Frame):
 
         self.listbox = tk.Listbox(
             list_frame, yscrollcommand=scrollbar.set,
-            bg=BG_DARK, fg=TEXT_LIGHT, selectbackground=ACCENT,
-            font=("Consolas", 9), relief=tk.FLAT, bd=0,
+            bg=BG_DARK, fg=TEXT_LIGHT,
+            selectbackground=ACCENT, selectforeground="white",
+            font=("Consolas", 8), relief=tk.FLAT, bd=0, height=8,
         )
         self.listbox.pack(fill=tk.BOTH, expand=True)
         scrollbar.config(command=self.listbox.yview)
 
-        # stats label
         self.stats_var = tk.StringVar(value="0 boxes")
-        tk.Label(
-            self, textvariable=self.stats_var,
-            bg=BG_PANEL, fg=TEXT_LIGHT, font=("Consolas", 9),
-        ).pack(pady=(4, 8))
+        stats_row = tk.Frame(self, bg=BG_PANEL)
+        stats_row.pack(fill=tk.X, padx=8, pady=(2, 0))
 
-        # action buttons
-        for text, cmd in [
-            ("⚡ YOLO This Frame", self._on_yolo),
-            ("🔁 YOLO All Frames", self._on_yolo_all),
-            ("💾 Save Annotations", self._on_save),
-            ("🗑 Clear Frame",      self._on_clear),
-        ]:
-            tk.Button(
-                self, text=text, command=cmd,
-                bg=ACCENT, fg="white", relief=tk.FLAT,
-                padx=8, pady=6, font=("Consolas", 9, "bold"),
-                cursor="hand2", anchor=tk.W,
-            ).pack(fill=tk.X, padx=8, pady=3)
+        tk.Label(
+            stats_row, textvariable=self.stats_var,
+            bg=BG_PANEL, fg=TEXT_LIGHT, font=("Consolas", 8),
+        ).pack(side=tk.LEFT)
+
+        tk.Button(
+            stats_row, text="🗑 Delete Selected",
+            command=self._delete_selected,
+            bg="#7a3333", fg="white", relief=tk.FLAT,
+            padx=6, pady=2, font=("Consolas", 8), cursor="hand2",
+        ).pack(side=tk.RIGHT)
+
+    def _build_bottom_buttons(self):
+        ttk.Separator(self, orient=tk.HORIZONTAL).pack(fill=tk.X, padx=8, pady=4)
+
+        tk.Button(
+            self, text="💾  Save Annotations",
+            command=self._on_save,
+            bg="#2d8a4e", fg="white", relief=tk.FLAT,
+            padx=8, pady=6, font=("Consolas", 9, "bold"), cursor="hand2",
+        ).pack(fill=tk.X, padx=8, pady=2)
+
+        tk.Button(
+            self, text="🗑  Clear Frame",
+            command=self._on_clear,
+            bg="#7a3333", fg="white", relief=tk.FLAT,
+            padx=8, pady=6, font=("Consolas", 9, "bold"), cursor="hand2",
+        ).pack(fill=tk.X, padx=8, pady=(2, 8))
+
+    # ── callbacks ─────────────────────────────────────────────────────────────
+    def _on_conf_slider(self, val):
+        self.conf_label.config(text=f"{float(val):.2f}")
+        if self._on_conf_change:
+            self._on_conf_change(float(val))
+
+    def _delete_selected(self):
+        sel = self.listbox.curselection()
+        if sel and self._on_delete_box:
+            self._on_delete_box(sel[0])
 
     # ── public API ────────────────────────────────────────────────────────────
     def update_boxes(self, boxes: List[BoundingBox], class_names: Dict[int, str]):
+        self._class_names = class_names
+
+        # Update combobox values from YOLO class names
+        names = sorted(set(class_names.values())) if class_names else ["object"]
+        self.class_combo["values"] = names
+        if names and self.selected_class_var.get() not in names:
+            self.selected_class_var.set(names[0])
+
+        # Update listbox
         self.listbox.delete(0, tk.END)
         for i, box in enumerate(boxes):
-            name = class_names.get(box.class_id, box.class_name)
-            conf = f"{box.confidence:.2f}"
+            src  = "YOLO" if box.confidence < 1.0 else " MAN"
+            conf = f"{box.confidence:.2f}" if box.confidence < 1.0 else "  — "
             self.listbox.insert(
                 tk.END,
-                f"  [{i:02d}] {name:<18} conf={conf}",
+                f"  [{i:02d}] {src}  {box.class_name:<14} {conf}",
             )
-        self.stats_var.set(f"{len(boxes)} box{'es' if len(boxes) != 1 else ''}")
+        n = len(boxes)
+        self.stats_var.set(f"{n} box{'es' if n != 1 else ''}")
+
+    def get_selected_class(self) -> str:
+        """Return custom class if typed, otherwise combo selection."""
+        custom = self.custom_class_var.get().strip()
+        return custom if custom else self.selected_class_var.get()
+
+    def get_confidence_threshold(self) -> float:
+        return float(self.conf_var.get())
+
+    def get_class_filter(self) -> List[str]:
+        """Return list of class names to keep, or [] for all."""
+        raw = self.filter_var.get().strip()
+        if not raw:
+            return []
+        return [c.strip().lower() for c in raw.split(",") if c.strip()]
