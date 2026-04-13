@@ -29,6 +29,23 @@ _SOURCE_LABELS = {
     "youtube":      "▶ YouTube",
 }
 
+SUPPORTED_EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".tiff", ".tif", ".webp"}
+
+
+def _find_images_recursive(folder: str):
+    """
+    Scan folder AND all subfolders for supported image files.
+    Returns sorted list of absolute paths.
+    """
+    found = []
+    for root, dirs, files in os.walk(folder):
+        # Sort dirs so traversal is deterministic
+        dirs.sort()
+        for f in sorted(files):
+            if os.path.splitext(f)[1].lower() in SUPPORTED_EXTS:
+                found.append(os.path.join(root, f))
+    return found
+
 
 class MainWindow(tk.Frame):
     def __init__(self, master):
@@ -150,14 +167,16 @@ class MainWindow(tk.Frame):
             try:
                 result = task_fn()
                 if done_fn:
-                    self.after(0, lambda: done_fn(result))
+                    self.after(0, lambda r=result: done_fn(r))
             except Exception as exc:
-                log.error(f"Background task error: {exc}", exc_info=True)
+                # FIX: Python 3.13 lambda scoping bug — capture exc explicitly
+                _exc = exc
+                log.error(f"Background task error: {_exc}", exc_info=True)
                 if error_fn:
-                    self.after(0, lambda: error_fn(exc))
+                    self.after(0, lambda e=_exc: error_fn(e))
                 else:
                     self.after(
-                        0, lambda: messagebox.showerror("Error", str(exc))
+                        0, lambda e=_exc: messagebox.showerror("Error", str(e))
                     )
             finally:
                 self.after(0, self._task_done)
@@ -319,12 +338,21 @@ class MainWindow(tk.Frame):
     def _load_images(self, path: str):
         is_folder = os.path.isdir(path)
         label     = "folder" if is_folder else "image"
-        self._set_status(
-            f"Loading {label}: {os.path.basename(path)}…"
-        )
+        self._set_status(f"Loading {label}: {os.path.basename(path)}…")
         log.info(f"Loading images — is_folder={is_folder}, path={path}")
 
         def _work():
+            # ── FIX: if folder has no images at root, scan subfolders ─────────
+            if is_folder:
+                all_images = _find_images_recursive(path)
+                if not all_images:
+                    raise FileNotFoundError(
+                        f"No images found in folder or subfolders:\n{path}\n\n"
+                        f"Supported formats: JPG, PNG, BMP, TIFF, WEBP\n\n"
+                        f"Make sure your images are inside the selected folder."
+                    )
+                log.info(f"Found {len(all_images)} image(s) in: {path}")
+
             loader = ImageLoader(path)
             loader.open()
 
@@ -488,8 +516,8 @@ class MainWindow(tk.Frame):
         log.info(f"YOLO all — conf={conf}, filter={cls_filter}")
 
         def _progress(done, tot):
-            self.after(0, lambda: self._set_status(
-                f"YOLO annotating… {done}/{tot}"
+            self.after(0, lambda d=done, t=tot: self._set_status(
+                f"YOLO annotating… {d}/{t}"
             ))
 
         def _work():
