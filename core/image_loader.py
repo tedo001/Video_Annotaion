@@ -11,6 +11,20 @@ import numpy as np
 from typing import List, Optional
 from utils.logger import get_logger
 
+
+def _safe_imread(path: str):
+    """
+    cv2.imread() silently returns None on Windows when the path contains
+    dots, spaces, or non-ASCII characters.
+    np.fromfile + imdecode works correctly on ALL Windows paths.
+    """
+    try:
+        buf = np.fromfile(path, dtype=np.uint8)
+        img = cv2.imdecode(buf, cv2.IMREAD_COLOR)
+        return img
+    except Exception:
+        return None
+
 log = get_logger("core.ImageLoader")
 
 SUPPORTED_EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".tiff", ".tif", ".webp"}
@@ -71,7 +85,7 @@ class ImageLoader:
         self.duration_sec = float(self.total_frames)
 
         # Read first image for dimensions
-        sample = cv2.imread(self.image_paths[0])
+        sample = _safe_imread(self.image_paths[0])
         if sample is not None:
             self.height, self.width = sample.shape[:2]
             log.info(f"Reference dimensions: {self.width}x{self.height}")
@@ -94,7 +108,7 @@ class ImageLoader:
             log.warning(f"Frame index {frame_index} out of range")
             return None
         path  = self.image_paths[frame_index]
-        frame = cv2.imread(path)
+        frame = _safe_imread(path)
         if frame is None:
             log.warning(f"Could not read image: {path}")
         return frame
